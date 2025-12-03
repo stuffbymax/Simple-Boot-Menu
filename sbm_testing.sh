@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-#  TUI DASHBOARD V4 (Enhanced System Info)
+#  TUI DASHBOARD V6 (Live Resource Monitor)
 # ==========================================
 
 # Colors
@@ -11,7 +11,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 clear
-echo -e "${CYAN}=== Installing Linux TUI Dashboard V4 ===${NC}"
+echo -e "${CYAN}=== Installing Linux TUI Dashboard V6 ===${NC}"
 
 # 1. CHECK ROOT
 if [ "$EUID" -ne 0 ]; then
@@ -71,16 +71,14 @@ save_config() {
     echo "THEME_BORDER=\"$THEME_BORDER\"" >> "$CONFIG_FILE"
 }
 
-# --- SYSTEM DATA ---
+# --- SYSTEM DATA HELPERS ---
 
-get_users() {
-    awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd
-}
+get_users() { awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd; }
 
 get_default_user() {
     local file="/etc/systemd/system/getty@tty1.service.d/override.conf"
     if [ -f "$file" ]; then
-        grep "autologin" "$file" | awk '{print $NF}'
+        sed -n 's/.*--autologin \([^ ]*\).*/\1/p' "$file"
     else
         echo "None"
     fi
@@ -114,53 +112,95 @@ create_new_user() {
 # --- UI DRAWING ---
 
 draw_info_box() {
-    # 1. Gather Real-Time Stats
+    # 1. GATHER LIVE STATS
+    
+    # OS & IP
     DISTRO=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2 | head -n 1)
     [ -z "$DISTRO" ] && DISTRO=$(uname -o)
-    
-    # CPU: Load Average
-    CPU_LOAD=$(cut -d ' ' -f1 /proc/loadavg)
-    
-    # RAM: Used / Total
-    MEM_DATA=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-    
-    # Disk: Root Usage
-    DISK_DATA=$(df -h / | awk 'NR==2 {print $3 "/" $2}')
-    
-    # IP Address (First non-loopback)
     IP_ADDR=$(hostname -I | awk '{print $1}')
     [ -z "$IP_ADDR" ] && IP_ADDR="Offline"
 
+    # CPU Usage (Overall)
+    CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2 + $4) "%"}')
+
+    # RAM Usage (Overall)
+    MEM_DATA=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
+
+    # Disk Usage (Root)
+    DISK_DATA=$(df -h / | awk 'NR==2 {print $5 " used"}')
+
+    # --- TOP PROCESSES LOGIC ---
+    
+    # 1. RAM Hog: Get Name and RSS (KB)
+    # We use ps to get the process using the most RSS memory
+    read ram_name ram_kb <<< $(ps -eo comm,rss --sort=-rss | awk 'NR==2 {print $1, $2}')
+    
+    # Convert KB to MB or GB
+    if [ -n "$ram_kb" ]; then
+        if [ "$ram_kb" -gt 1048576 ]; then
+            ram_display=$(awk -v val=$ram_kb 'BEGIN {printf "%.1fGB", val/1024/1024}')
+        else
+            ram_display=$(awk -v val=$ram_kb 'BEGIN {printf "%.0fMB", val/1024}')
+        fi
+        RAM_HOG="$ram_name ($ram_display)"
+    else
+        RAM_HOG="Calculating..."
+    fi
+
+    # 2. CPU Hog: Get Name and CPU %
+    read cpu_name cpu_val <<< $(ps -eo comm,pcpu --sort=-pcpu | awk 'NR==2 {print $1, $2}')
+    if [ -n "$cpu_val" ]; then
+        CPU_HOG="$cpu_name ($cpu_val%)"
+    else
+        CPU_HOG="Calculating..."
+    fi
+
     DEF_USER=$(get_default_user)
 
-    # 2. Draw Box
+    # 2. DRAW BOX
     local cols=$(tput cols)
-    local width=35
+    local width=36
     local start_col=$((cols - width - 2))
 
-    # Draw Top Border
+    # Borders
     tput cup 1 $start_col
     echo -ne "${C_BOX}${TLC}"
     for ((i=0; i<width; i++)); do echo -ne "$H"; done
     echo -ne "${TRC}${C_RESET}"
 
-    # Helper for lines
+    # Helper function to print a line
     draw_line() {
         local r=$1; local l=$2; local v=$3
+        # Truncate value if too long to prevent box breaking
+        local max_len=$((width - ${#l} - 2))
+        if [ ${#v} -gt $max_len ]; then v="${v:0:$((max_len-1))}…"; fi
+        
         tput cup $r $start_col
         echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}${l}${C_RESET} ${v}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
     }
 
-    draw_line 2 "OS:  " "${DISTRO:0:22}"
-    draw_line 3 "User:" "$USER (Def: $DEF_USER)"
-    draw_line 4 "─────" "────────────────────────"
-    draw_line 5 "CPU: " "Load: $CPU_LOAD"
-    draw_line 6 "RAM: " "$MEM_DATA"
-    draw_line 7 "Disk:" "$DISK_DATA"
-    draw_line 8 "IP:  " "$IP_ADDR"
+    draw_line 2 "OS:   " "${DISTRO}"
+    draw_line 3 "User: " "$USER"
+    draw_line 4 "Def.: " "$DEF_USER"
+    draw_line 5 "IP:   " "$IP_ADDR"
+    
+    # Separator
+    tput cup 6 $start_col
+    echo -e "${C_BOX}${V}${C_RESET} \033[2m────────────────────────────────\033[0m \033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
 
-    # Draw Bottom Border
-    tput cup 9 $start_col
+    draw_line 7 "CPU:  " "$CPU_USAGE (Load)"
+    draw_line 8 "RAM:  " "$MEM_DATA"
+    draw_line 9 "Disk: " "$DISK_DATA"
+    
+    # Separator
+    tput cup 10 $start_col
+    echo -e "${C_BOX}${V}${C_RESET} \033[2m── Top Processes ───────────────\033[0m \033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
+    
+    draw_line 11 "RAM+: " "$RAM_HOG"
+    draw_line 12 "CPU+: " "$CPU_HOG"
+
+    # Bottom Border
+    tput cup 13 $start_col
     echo -ne "${C_BOX}${BLC}"
     for ((i=0; i<width; i++)); do echo -ne "$H"; done
     echo -ne "${BRC}${C_RESET}"
@@ -235,10 +275,11 @@ menu_customize() {
 menu_debug() {
     clear
     echo -e "${C_ACCENT}--- FULL SYSTEM DEBUG ---${C_RESET}\n"
-    echo -e "${C_BOLD}Network:${C_RESET}    $(hostname -I)"
-    echo -e "${C_BOLD}Disk Usage:${C_RESET} $(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')"
-    echo -e "${C_BOLD}RAM Usage:${C_RESET}  $(free -h | awk '/^Mem:/ {print $3 " / " $2}')"
-    echo -e "${C_BOLD}Uptime:${C_RESET}     $(uptime -p)"
+    echo -e "${C_BOLD}Network IPs:${C_RESET}"
+    ip -4 addr | grep inet | awk '{print "  " $2 " (" $NF ")"}'
+    echo -e "\n${C_BOLD}Top 5 Memory Hogs (MB):${C_RESET}"
+    # Show top 5 with human readable sizes
+    ps -eo comm,rss --sort=-rss | head -6 | awk 'NR>1 {printf "  %-20s %d MB\n", $1, $2/1024}'
     echo -e "\n${C_BOLD}Failed Services:${C_RESET}"
     systemctl --failed --no-legend | sed 's/^/  /'
     echo -e "\nPress Key to Return"
@@ -261,19 +302,31 @@ SESSIONS+=("Shell (Exit)"); CMDS+=("exit")
 SESSIONS+=("Reboot"); CMDS+=("systemctl reboot")
 SESSIONS+=("Shutdown"); CMDS+=("systemctl poweroff")
 SEL=0
+
 while true; do
-    clear; draw_info_box; draw_list "BOOT MENU" SESSIONS SEL
-    read -rsn1 key
+    draw_info_box # Redraw stats every loop
+    draw_list "BOOT MENU" SESSIONS SEL
+    
+    # Wait for key input WITH TIMEOUT (2 seconds)
+    # This allows the loop to repeat and update stats automatically
+    read -rsn1 -t 2 key
+    
     if [[ $key == $'\x1b' ]]; then
         read -rsn2 key
         case "$key" in '[A') ((SEL--)); [[ "${SESSIONS[$SEL]}" == *"──"* ]] && ((SEL--));; '[B') ((SEL++)); [[ "${SESSIONS[$SEL]}" == *"──"* ]] && ((SEL++));; esac
         [ $SEL -lt 0 ] && SEL=$((${#SESSIONS[@]}-1)); [ $SEL -ge ${#SESSIONS[@]} ] && SEL=0
     elif [[ $key == "" ]]; then
+        # Check if read timed out (empty string due to timeout vs actual Enter key)
+        # Bash read -t returns exit code greater than 128 on timeout
+        if [ $? -gt 128 ]; then
+             continue # It was a timeout, just refresh screen
+        fi
+        
         CMD=${CMDS[$SEL]}
         case "$CMD" in
             "none") continue ;;
-            "ark") menu_customize ;;
-            "debug") menu_debug ;;
+            "ark") menu_customize; clear ;; # Clear ensures full redraw on return
+            "debug") menu_debug; clear ;;
             "exit") tput cnorm; clear; exit 0 ;;
             *"systemctl"*) clear; eval $CMD ;;
             *) tput cnorm; clear; if [[ -f ~/.xinitrc ]]; then sed -i '/^exec/d' ~/.xinitrc; echo "exec $CMD" >> ~/.xinitrc; startx; else eval $CMD; fi; exit 0 ;;
@@ -315,4 +368,4 @@ EOF
 fi
 
 echo -e "\n${GREEN}=== COMPLETE ===${NC}"
-echo "Reboot to see your new Debug Info Dashboard."
+echo "Reboot. The Top-Right Box will now live-update RAM/CPU every 2 seconds."
