@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# ==========================================
-#  TUI DASHBOARD V3 INSTALLER
-# ==========================================
+# ===============================================
+#  TUI DASHBOARD V8 (Custom Borders & Images)
+# ===============================================
 
 # Colors
 GREEN='\033[0;32m'
@@ -11,7 +11,7 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 clear
-echo -e "${CYAN}=== Installing Linux TUI Dashboard (V3) ===${NC}"
+echo -e "${CYAN}=== Installing Linux TUI Dashboard V8 ===${NC}"
 
 # 1. CHECK ROOT
 if [ "$EUID" -ne 0 ]; then
@@ -19,315 +19,394 @@ if [ "$EUID" -ne 0 ]; then
   exit 1
 fi
 
-# 2. GET TARGET USER
-# We need to know who to set as the default auto-login user
-echo -e "\nWhich user should auto-login to the menu?"
+# 2. DEPENDENCY CHECK (Python & Chafa)
+echo -e "${CYAN}Checking dependencies...${NC}"
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}Error: Python3 is required for login.${NC}"; exit 1
+fi
+
+# Install Chafa for Image support if missing
+if ! command -v chafa &> /dev/null; then
+    echo "Installing 'chafa' for image support..."
+    apt-get install -y chafa 2>/dev/null || pacman -S --noconfirm chafa 2>/dev/null || dnf install -y chafa 2>/dev/null
+    if ! command -v chafa &> /dev/null; then
+        echo -e "${RED}Warning: 'chafa' could not be installed. Image mode will fail gracefully.${NC}"
+    fi
+fi
+
+# 3. USER CONFIG
+echo -e "\nWhich user should be the DEFAULT selected user?"
 read -p "Username: " TARGET_USER
 
 if ! id "$TARGET_USER" >/dev/null 2>&1; then
-    echo -e "${RED}User '$TARGET_USER' does not exist.${NC}"
-    exit 1
+    echo -e "${RED}User '$TARGET_USER' does not exist.${NC}"; exit 1
 fi
 
-echo -e "Target user confirmed: ${GREEN}$TARGET_USER${NC}"
-
-# 3. INSTALL DEPENDENCIES
-echo -e "\n${CYAN}[1/5] Checking dependencies...${NC}"
-# Usually these are installed, but good to check
-if ! command -v tput &> /dev/null; then
-    echo "Installing ncurses-bin..."
-    apt-get install -y ncurses-bin 2>/dev/null || pacman -S --noconfirm ncurses 2>/dev/null || dnf install -y ncurses 2>/dev/null
+# 4. GLOBAL CONFIG
+CONFIG_FILE="/etc/bootmenu.conf"
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${CYAN}Creating global config at $CONFIG_FILE...${NC}"
+    cat << EOF > "$CONFIG_FILE"
+# Global Boot Menu Configuration
+DEFAULT_USER="$TARGET_USER"
+AUTO_LOGIN="true"
+THEME_COLOR="6"        # 1=Red, 2=Green, 3=Yellow, 4=Blue, 5=Purple, 6=Cyan, 7=White
+BORDER_COLOR="7"       # Independent Border Color
+BORDER_STYLE="rounded" # single, double, rounded, bold
+SHOW_IMAGE="false"     # Set to true to show image
+IMAGE_PATH="/usr/share/pixmaps/boot_logo.png" # Put your png/jpg here
+EOF
+    chmod 644 "$CONFIG_FILE"
+else
+    echo -e "${CYAN}Updating existing config...${NC}"
+    # Append new vars if missing
+    grep -q "BORDER_COLOR" "$CONFIG_FILE" || echo 'BORDER_COLOR="7"' >> "$CONFIG_FILE"
+    grep -q "BORDER_STYLE" "$CONFIG_FILE" || echo 'BORDER_STYLE="rounded"' >> "$CONFIG_FILE"
+    grep -q "SHOW_IMAGE" "$CONFIG_FILE" || echo 'SHOW_IMAGE="false"' >> "$CONFIG_FILE"
+    grep -q "IMAGE_PATH" "$CONFIG_FILE" || echo 'IMAGE_PATH="/usr/share/pixmaps/boot_logo.png"' >> "$CONFIG_FILE"
 fi
 
-# 4. WRITE THE MAIN SCRIPT
-echo -e "${CYAN}[2/5] Installing script to /usr/local/bin/boot_menu.sh...${NC}"
+# 5. WRITE MAIN SCRIPT
+echo -e "${CYAN}Installing script to /usr/local/bin/boot_menu.sh...${NC}"
 
 cat << 'EOF' > /usr/local/bin/boot_menu.sh
 #!/bin/bash
 
-# --- CONFIGURATION & INIT ---
-CONFIG_FILE="$HOME/.config/bootmenu.conf"
-mkdir -p "$(dirname "$CONFIG_FILE")"
+# --- CONFIGURATION ---
+GLOBAL_CONF="/etc/bootmenu.conf"
+if [ -f "$GLOBAL_CONF" ]; then source "$GLOBAL_CONF"; fi
 
 # Defaults
-THEME_COLOR="6"   # Cyan
-THEME_BORDER="1"  # 1=Single, 2=Double
-THEME_STYLE="box" 
+: ${THEME_COLOR:="6"}
+: ${BORDER_COLOR:="7"}
+: ${BORDER_STYLE:="rounded"}
+: ${DEFAULT_USER:="root"}
+: ${AUTO_LOGIN:="false"}
+: ${SHOW_IMAGE:="false"}
+: ${IMAGE_PATH:=""}
 
-# Load Config
-if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
-
-# Setup Colors & Traps
+# --- INIT ---
 tput civis
 trap "tput cnorm; clear; exit" INT TERM
+C_RESET=$(tput sgr0); C_BOLD=$(tput bold)
+C_SEL_BG=$(tput setab 4); C_SEL_FG=$(tput setaf 7); C_ERR=$(tput setaf 1)
 
-C_RESET=$(tput sgr0)
-C_BOLD=$(tput bold)
-C_SEL_BG=$(tput setab 4); C_SEL_FG=$(tput setaf 7)
-
-# Helper: Update Color Scheme
-update_colors() {
+# --- THEME ENGINE ---
+update_theme() {
+    # Text Color
     C_ACCENT=$(tput setaf "$THEME_COLOR")
-    C_BOX=$(tput setaf 8)
-    if [ "$THEME_BORDER" == "1" ]; then
-        TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘"
-    else
-        TLC="╔" TRC="╗" H="═" V="║" BLC="╚" BRC="╝"
-    fi
+    # Border Color
+    C_BORDER=$(tput setaf "$BORDER_COLOR")
+    
+    # Border Styles
+    case "$BORDER_STYLE" in
+        "double")  TLC="╔" TRC="╗" H="═" V="║" BLC="╚" BRC="╝" ;;
+        "rounded") TLC="╭" TRC="╮" H="─" V="│" BLC="╰" BRC="╯" ;;
+        "bold")    TLC="┏" TRC="┓" H="━" V="┃" BLC="┗" BRC="┛" ;;
+        *)         TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘" ;; # Single
+    esac
 }
-update_colors
+update_theme
 
 save_config() {
-    echo "THEME_COLOR=\"$THEME_COLOR\"" > "$CONFIG_FILE"
-    echo "THEME_BORDER=\"$THEME_BORDER\"" >> "$CONFIG_FILE"
+    # Helper to sed in place
+    update_conf() {
+        local key=$1; local val=$2
+        if grep -q "^$key=" "$GLOBAL_CONF"; then
+            sudo sed -i "s|^$key=.*|$key=\"$val\"|" "$GLOBAL_CONF"
+        else
+            echo "$key=\"$val\"" | sudo tee -a "$GLOBAL_CONF" >/dev/null
+        fi
+    }
+    update_conf "THEME_COLOR" "$THEME_COLOR"
+    update_conf "BORDER_COLOR" "$BORDER_COLOR"
+    update_conf "BORDER_STYLE" "$BORDER_STYLE"
+    update_conf "DEFAULT_USER" "$DEFAULT_USER"
+    update_conf "AUTO_LOGIN" "$AUTO_LOGIN"
+    update_conf "SHOW_IMAGE" "$SHOW_IMAGE"
 }
 
-# --- USER MANAGEMENT LOGIC ---
+# --- GRAPHICS ---
 
-get_users() {
-    awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd
-}
-
-get_default_user() {
-    local file="/etc/systemd/system/getty@tty1.service.d/override.conf"
-    if [ -f "$file" ]; then
-        grep "autologin" "$file" | awk '{print $NF}'
+draw_image_or_logo() {
+    local cols=$(tput cols)
+    local center=$(( (cols - 30) / 2 ))
+    
+    if [ "$SHOW_IMAGE" == "true" ] && [ -f "$IMAGE_PATH" ] && command -v chafa >/dev/null; then
+        # Draw Image using Chafa (Sized to fit above menu)
+        tput cup 1 $center
+        # We limit size to 30 cols wide, 10 lines high
+        chafa "$IMAGE_PATH" --size 30x10 --align center 2>/dev/null
     else
-        echo "None"
+        # Fallback ASCII Logo
+        tput cup 2 $center
+        echo -e "${C_ACCENT}${C_BOLD}    LINUX DASHBOARD    ${C_RESET}"
+        tput cup 3 $center
+        echo -e "${C_BORDER}    V8 Custom Edition    ${C_RESET}"
     fi
 }
-
-set_default_user() {
-    local target_user=$1
-    local service_dir="/etc/systemd/system/getty@tty1.service.d"
-    local service_file="$service_dir/override.conf"
-    clear
-    echo -e "${C_ACCENT}Setting $target_user as default boot user...${C_RESET}"
-    echo "Enter sudo password if requested:"
-    CMD_STR="[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --skip-login --nonewline --noissue --autologin $target_user --noclear %I \$TERM
-TTYVTDisallocate=no"
-    echo "$CMD_STR" | sudo tee "$service_file" > /dev/null
-    sudo systemctl daemon-reload
-    echo -e "${C_BOLD}Done. Reboot to see changes.${C_RESET}"
-    sleep 2
-}
-
-create_new_user() {
-    clear
-    tput cnorm
-    echo -e "${C_ACCENT}--- CREATE NEW USER ---${C_RESET}"
-    read -p "Enter new username: " NEW_USER
-    if id "$NEW_USER" >/dev/null 2>&1; then
-        echo "User already exists!"
-        sleep 2; return
-    fi
-    echo "Creating user $NEW_USER..."
-    sudo useradd -m -G wheel -s /bin/bash "$NEW_USER"
-    echo "Set password for $NEW_USER:"
-    sudo passwd "$NEW_USER"
-    echo "User created."
-    sleep 2
-    tput civis
-}
-
-# --- UI DRAWING ---
 
 draw_info_box() {
+    # Live Stats
     DISTRO=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2 | head -n 1)
-    KERNEL=$(uname -r)
-    local cols=$(tput cols)
-    local width=32
+    [ -z "$DISTRO" ] && DISTRO=$(uname -o)
+    IP=$(hostname -I | awk '{print $1}')
+    [ -z "$IP" ] && IP="Offline"
+    CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2 + $4) "%"}')
+    RAM=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
+    DISK=$(df -h / | awk 'NR==2 {print $5}')
+    
+    # Top Processes
+    read r_n r_k <<< $(ps -eo comm,rss --sort=-rss | awk 'NR==2 {print $1, $2}')
+    [ -n "$r_k" ] && R_HOG="$r_n ($((r_k/1024))MB)" || R_HOG="..."
+
+    # Draw Box
+    local cols=$(tput cols); local width=34
     local start_col=$((cols - width - 2))
 
+    # Box Borders
     tput cup 1 $start_col
-    echo -ne "${C_BOX}${TLC}"
+    echo -ne "${C_BORDER}${TLC}"
     for ((i=0; i<width; i++)); do echo -ne "$H"; done
     echo -ne "${TRC}${C_RESET}"
-    tput cup 2 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}OS:${C_RESET}   ${DISTRO:0:20}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
-    tput cup 3 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}User:${C_RESET} ${USER}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
-    tput cup 4 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}Def.:${C_RESET} $(get_default_user)\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
-    tput cup 5 $start_col
-    echo -ne "${C_BOX}${BLC}"
+
+    # Helper
+    d_line() {
+        local r=$1; local l=$2; local v=$3
+        local max=$((width - ${#l} - 2))
+        if [ ${#v} -gt $max ]; then v="${v:0:$((max-1))}…"; fi
+        tput cup $r $start_col
+        echo -e "${C_BORDER}${V}${C_RESET} ${C_ACCENT}${l}${C_RESET} ${v}\033[${start_col}G\033[${width}C ${C_BORDER}${V}${C_RESET}"
+    }
+
+    d_line 2 "OS:  " "${DISTRO}"
+    d_line 3 "User:" "$USER"
+    d_line 4 "Def: " "$DEFAULT_USER"
+    d_line 5 "Auto:" "$AUTO_LOGIN"
+    
+    tput cup 6 $start_col; echo -e "${C_BORDER}${V}${C_RESET} \033[2m──────────────────────────────\033[0m \033[${start_col}G\033[${width}C ${C_BORDER}${V}${C_RESET}"
+
+    d_line 7 "CPU: " "$CPU"
+    d_line 8 "RAM: " "$RAM"
+    d_line 9 "Disk:" "$DISK"
+    d_line 10 "IP:  " "$IP"
+    d_line 11 "Hog: " "$R_HOG"
+
+    tput cup 12 $start_col
+    echo -ne "${C_BORDER}${BLC}"
     for ((i=0; i<width; i++)); do echo -ne "$H"; done
     echo -ne "${BRC}${C_RESET}"
 }
 
 draw_list() {
-    local title=$1
-    local -n arr_opts=$2; local -n arr_sel=$3
-    tput cup 2 4
+    local title=$1; local -n arr=$2; local -n sel=$3
+    
+    # Header placement (below image area)
+    local start_y=14 
+    
+    tput cup $start_y 4
     echo -e "${C_ACCENT}${C_BOLD}$title${C_RESET}"
-    for ((i=0; i<${#arr_opts[@]}; i++)); do
-        tput cup $((4+i)) 4
-        if [ $i -eq $arr_sel ]; then
-            echo -e "${C_SEL_BG}${C_SEL_FG} > ${arr_opts[$i]} ${C_RESET}"
+    
+    for ((i=0; i<${#arr[@]}; i++)); do
+        tput cup $((start_y + 2 + i)) 4
+        if [ $i -eq $sel ]; then
+            echo -e "${C_SEL_BG}${C_SEL_FG} > ${arr[$i]} ${C_RESET}"
         else
-            echo -e "   ${arr_opts[$i]} "
+            echo -e "   ${arr[$i]} "
         fi
     done
 }
 
 # --- MENUS ---
 
+menu_customize() {
+    local c_sel=0
+    while true; do
+        draw_image_or_logo
+        local c_opts=(
+            "Text Color:   $THEME_COLOR" 
+            "Border Color: $BORDER_COLOR" 
+            "Border Style: $BORDER_STYLE" 
+            "Show Image:   $SHOW_IMAGE"
+            "User Management >" 
+            "Save & Back"
+        )
+        draw_info_box
+        draw_list "CUSTOMIZE ARK" c_opts c_sel
+        
+        read -rsn1 key
+        if [[ $key == $'\x1b' ]]; then
+            read -rsn2 key
+            case "$key" in '[A') ((c_sel--));; '[B') ((c_sel++));; esac
+            [ $c_sel -lt 0 ] && c_sel=5; [ $c_sel -gt 5 ] && c_sel=0
+        elif [[ $key == "" ]]; then
+            case $c_sel in
+                0) ((THEME_COLOR++)); [ $THEME_COLOR -gt 7 ] && THEME_COLOR=1; update_theme ;;
+                1) ((BORDER_COLOR++)); [ $BORDER_COLOR -gt 7 ] && BORDER_COLOR=1; update_theme ;;
+                2) # Cycle Styles
+                   if [ "$BORDER_STYLE" == "single" ]; then BORDER_STYLE="double"
+                   elif [ "$BORDER_STYLE" == "double" ]; then BORDER_STYLE="rounded"
+                   elif [ "$BORDER_STYLE" == "rounded" ]; then BORDER_STYLE="bold"
+                   else BORDER_STYLE="single"; fi; update_theme ;;
+                3) if [ "$SHOW_IMAGE" == "true" ]; then SHOW_IMAGE="false"; else SHOW_IMAGE="true"; fi; clear ;;
+                4) menu_user_manager; clear ;;
+                5) save_config; return ;;
+            esac
+        fi
+    done
+}
+
 menu_user_manager() {
     local u_sel=0
     while true; do
-        local u_opts=("Set Default Boot User" "Switch User (Login)" "Create New User" "Change Password" "Back")
-        clear
-        draw_info_box
-        draw_list "USER MANAGER" u_opts u_sel
+        local u_opts=("Toggle Auto-Login ($AUTO_LOGIN)" "Set Default ($DEFAULT_USER)" "Switch User" "Create User" "Back")
+        draw_info_box; draw_list "USER MANAGER" u_opts u_sel
         read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
             read -rsn2 key
             case "$key" in '[A') ((u_sel--));; '[B') ((u_sel++));; esac
-            [ $u_sel -lt 0 ] && u_sel=$(( ${#u_opts[@]} - 1 )); [ $u_sel -ge ${#u_opts[@]} ] && u_sel=0
+            [ $u_sel -lt 0 ] && u_sel=4; [ $u_sel -gt 4 ] && u_sel=0
         elif [[ $key == "" ]]; then
             case $u_sel in
-                0) local all_users=($(get_users)); local pick_sel=0
-                   while true; do
-                       clear; draw_list "SELECT DEFAULT USER" all_users pick_sel
-                       read -rsn1 k
-                       if [[ $k == "" ]]; then set_default_user "${all_users[$pick_sel]}"; break;
-                       elif [[ $k == $'\x1b' ]]; then read -rsn2 k; case "$k" in '[A') ((pick_sel--));; '[B') ((pick_sel++));; esac
-                            [ $pick_sel -lt 0 ] && pick_sel=$((${#all_users[@]}-1)); [ $pick_sel -ge ${#all_users[@]} ] && pick_sel=0; fi
-                   done ;;
-                1) tput cnorm; clear; echo "Enter username:"; read target_u; if id "$target_u" >/dev/null 2>&1; then su - "$target_u" -c "$0"; tput civis; else echo "Not found."; sleep 1; fi ;;
-                2) create_new_user ;;
-                3) tput cnorm; clear; echo "Enter user:"; read pu; sudo passwd "$pu"; tput civis ;;
+                0) [ "$AUTO_LOGIN" == "true" ] && AUTO_LOGIN="false" || AUTO_LOGIN="true"; save_config ;;
+                1) local all=($(awk -F: '$3>=1000{print $1}' /etc/passwd)); local p_sel=0;
+                   while true; do clear; draw_list "PICK USER" all p_sel; read -rsn1 k;
+                   [[ $k == "" ]] && { DEFAULT_USER="${all[$p_sel]}"; save_config; break; };
+                   [[ $k == $'\x1b' ]] && { read -rsn2 k; [ "$k" == "[A" ] && ((p_sel--)); [ "$k" == "[B" ] && ((p_sel++)); };
+                   [ $p_sel -lt 0 ] && p_sel=$((${#all[@]}-1)); [ $p_sel -ge ${#all[@]} ] && p_sel=0; done ;;
+                2) tput cnorm; clear; read -p "User: " tu; id "$tu" >/dev/null && su - "$tu" -c "$0" || sleep 1; tput civis; clear ;;
+                3) tput cnorm; clear; read -p "New User: " nu; sudo useradd -m -s /bin/bash "$nu" && sudo passwd "$nu"; tput civis; clear ;;
                 4) return ;;
             esac
         fi
     done
 }
 
-menu_customize() {
-    local c_sel=0
+menu_debug() {
+    clear; echo -e "${C_ACCENT}SYSTEM DEBUG${C_RESET}\n"
+    ip -4 addr | grep inet; echo ""
+    systemctl --failed --no-legend
+    read -rsn1
+}
+
+# --- MODES ---
+
+run_greeter() {
+    [ "$AUTO_LOGIN" == "true" ] && exec /bin/login -f "$DEFAULT_USER"
+    
+    # Python Auth Script
+    PY_AUTH="import spwd,crypt,sys;
+try: print('OK' if crypt.crypt(sys.argv[1], spwd.getspnam(sys.argv[2]).sp_pwdp) == spwd.getspnam(sys.argv[2]).sp_pwdp else 'NO')
+except: print('NO')"
+
+    local users=($(awk -F: '$3>=1000{print $1}' /etc/passwd))
+    local sel=0
+    
     while true; do
-        local c_opts=("Color Theme: $THEME_COLOR" "Border Style: $THEME_BORDER" "User Management >" "Save & Back")
-        clear; draw_info_box; draw_list "CUSTOMIZE ARK" c_opts c_sel
+        clear
+        draw_image_or_logo
+        # Center Login
+        local cx=$(( ($(tput cols)-20)/2 )); local cy=14
+        tput cup $cy $cx; echo -e "${C_ACCENT}${C_BOLD}SYSTEM LOGIN${C_RESET}"
+        
+        for ((i=0; i<${#users[@]}; i++)); do
+            tput cup $((cy+2+i)) $cx
+            [ $i -eq $sel ] && echo -e "${C_SEL_BG}${C_SEL_FG} > ${users[$i]} ${C_RESET}" || echo -e "   ${users[$i]} "
+        done
+        
         read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
-            read -rsn2 key
-            case "$key" in '[A') ((c_sel--));; '[B') ((c_sel++));; esac
-            [ $c_sel -lt 0 ] && c_sel=3; [ $c_sel -gt 3 ] && c_sel=0
+             read -rsn2 key; [ "$key" == "[A" ] && ((sel--)); [ "$key" == "[B" ] && ((sel++));
+             [ $sel -lt 0 ] && sel=$((${#users[@]}-1)); [ $sel -ge ${#users[@]} ] && sel=0
         elif [[ $key == "" ]]; then
-            case $c_sel in
-                0) ((THEME_COLOR++)); [ $THEME_COLOR -gt 7 ] && THEME_COLOR=1; update_colors ;;
-                1) if [ "$THEME_BORDER" == "1" ]; then THEME_BORDER="2"; else THEME_BORDER="1"; fi; update_colors ;;
-                2) menu_user_manager ;;
-                3) save_config; return ;;
-            esac
+             tput cup $((cy+${#users[@]}+3)) $cx; echo -ne "Password: "
+             tput cnorm; read -s pwd; tput civis; echo ""
+             res=$(python3 -c "$PY_AUTH" "$pwd" "${users[$sel]}")
+             if [ "$res" == "OK" ]; then clear; exec /bin/login -f "${users[$sel]}"; else echo "Fail"; sleep 1; fi
         fi
     done
 }
 
-menu_debug() {
-    clear
-    echo -e "${C_ACCENT}--- DEBUG INFO ---${C_RESET}\n"
-    echo -e "${C_BOLD}IP:${C_RESET} $(hostname -I)"
-    echo -e "${C_BOLD}Disk:${C_RESET} $(df -h / | awk 'NR==2 {print $5}')"
-    echo -e "${C_BOLD}Failed Services:${C_RESET}"
-    systemctl --failed --no-legend | sed 's/^/  /'
-    echo -e "\nPress Key to Return"
-    read -rsn1
-}
-
-# --- MAIN LOOP ---
-SESSIONS=(); CMDS=()
-for path in /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop; do
-    [ -f "$path" ] || continue
-    name=$(grep -m 1 "^Name=" "$path" | cut -d= -f2)
-    [ -z "$name" ] && name=$(basename "$path" .desktop)
-    exec_cmd=$(grep -m 1 "^Exec=" "$path" | cut -d= -f2)
-    if [[ ! " ${SESSIONS[*]} " =~ " ${name} " ]]; then SESSIONS+=("$name"); CMDS+=("$exec_cmd"); fi
-done
-SESSIONS+=("──────────────"); CMDS+=("none")
-SESSIONS+=("Settings / Ark"); CMDS+=("ark")
-SESSIONS+=("Debug Info"); CMDS+=("debug")
-SESSIONS+=("Shell (Exit)"); CMDS+=("exit")
-SESSIONS+=("Reboot"); CMDS+=("systemctl reboot")
-SESSIONS+=("Shutdown"); CMDS+=("systemctl poweroff")
-SEL=0
-while true; do
-    clear; draw_info_box; draw_list "BOOT MENU" SESSIONS SEL
-    read -rsn1 key
-    if [[ $key == $'\x1b' ]]; then
-        read -rsn2 key
-        case "$key" in '[A') ((SEL--)); [[ "${SESSIONS[$SEL]}" == *"──"* ]] && ((SEL--));; '[B') ((SEL++)); [[ "${SESSIONS[$SEL]}" == *"──"* ]] && ((SEL++));; esac
-        [ $SEL -lt 0 ] && SEL=$((${#SESSIONS[@]}-1)); [ $SEL -ge ${#SESSIONS[@]} ] && SEL=0
-    elif [[ $key == "" ]]; then
-        CMD=${CMDS[$SEL]}
-        case "$CMD" in
-            "none") continue ;;
-            "ark") menu_customize ;;
-            "debug") menu_debug ;;
-            "exit") tput cnorm; clear; exit 0 ;;
-            *"systemctl"*) clear; eval $CMD ;;
-            *) tput cnorm; clear; if [[ -f ~/.xinitrc ]]; then sed -i '/^exec/d' ~/.xinitrc; echo "exec $CMD" >> ~/.xinitrc; startx; else eval $CMD; fi; exit 0 ;;
-        esac
-    fi
-done
+# --- MAIN ---
+if [ "$EUID" -eq 0 ] && [ "$1" != "user_mode" ]; then
+    run_greeter
+else
+    # SESSIONS
+    OPTS=(); CMDS=()
+    for p in /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop; do
+        [ -f "$p" ] || continue
+        n=$(grep -m1 "^Name=" "$p" | cut -d= -f2); [ -z "$n" ] && n=$(basename "$p" .desktop)
+        OPTS+=("$n"); CMDS+=($(grep -m1 "^Exec=" "$p" | cut -d= -f2))
+    done
+    OPTS+=("──────────"); CMDS+=("none")
+    OPTS+=("Settings / Ark"); CMDS+=("ark")
+    OPTS+=("Debug Info"); CMDS+=("debug")
+    OPTS+=("Exit"); CMDS+=("exit")
+    OPTS+=("Reboot"); CMDS+=("systemctl reboot")
+    OPTS+=("Shutdown"); CMDS+=("systemctl poweroff")
+    SEL=0
+    
+    while true; do
+        draw_image_or_logo
+        draw_info_box
+        draw_list "BOOT MENU" OPTS SEL
+        
+        read -rsn1 -t 2 key
+        [ $? -gt 128 ] && continue
+        
+        if [[ $key == $'\x1b' ]]; then
+            read -rsn2 key
+            case "$key" in '[A') ((SEL--)); [[ "${OPTS[$SEL]}" == *"──"* ]] && ((SEL--));; '[B') ((SEL++)); [[ "${OPTS[$SEL]}" == *"──"* ]] && ((SEL++));; esac
+            [ $SEL -lt 0 ] && SEL=$((${#OPTS[@]}-1)); [ $SEL -ge ${#OPTS[@]} ] && SEL=0
+        elif [[ $key == "" ]]; then
+            C=${CMDS[$SEL]}
+            case "$C" in
+                "none") continue ;;
+                "ark") menu_customize; clear ;;
+                "debug") menu_debug; clear ;;
+                "exit") tput cnorm; clear; exit 0 ;;
+                *"systemctl"*) clear; eval $C ;;
+                *) tput cnorm; clear; if [[ -f ~/.xinitrc ]]; then sed -i '/^exec/d' ~/.xinitrc; echo "exec $C" >> ~/.xinitrc; startx; else eval $C; fi; exit 0 ;;
+            esac
+        fi
+    done
+fi
 EOF
 
 chmod +x /usr/local/bin/boot_menu.sh
-echo -e "${GREEN}Script installed successfully.${NC}"
+echo -e "${GREEN}Script V8 installed.${NC}"
 
-# 5. CONFIGURE AUTO-LOGIN
-echo -e "\n${CYAN}[3/5] Configuring Systemd Autologin (TTY1)...${NC}"
-SERVICE_DIR="/etc/systemd/system/getty@tty1.service.d"
-mkdir -p "$SERVICE_DIR"
-
-cat << EOF > "$SERVICE_DIR/override.conf"
+# 6. SYSTEMD & SHELL
+cat << EOF > /etc/systemd/system/bootmenu.service
+[Unit]
+Description=TUI Boot V8
+After=systemd-user-sessions.service plymouth-quit-wait.service
+Conflicts=getty@tty1.service
 [Service]
-ExecStart=
-ExecStart=-/sbin/agetty --skip-login --nonewline --noissue --autologin $TARGET_USER --noclear %I \$TERM
-TTYVTDisallocate=no
+ExecStart=/usr/local/bin/boot_menu.sh
+StandardInput=tty
+StandardOutput=tty
+TTYPath=/dev/tty1
+Type=idle
+Environment=TERM=linux
+Restart=always
+[Install]
+WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-echo -e "${GREEN}Override file created.${NC}"
+systemctl disable getty@tty1.service
+systemctl enable bootmenu.service
 
-# 6. CONFIGURE SHELL STARTUP
-echo -e "\n${CYAN}[4/5] Hooking into user shell profile...${NC}"
-
-# Detect shell file
-USER_HOME=$(eval echo "~$TARGET_USER")
-SHELL_FILE=""
-
-if [ -f "$USER_HOME/.zshrc" ]; then
-    SHELL_FILE="$USER_HOME/.zshrc"
-elif [ -f "$USER_HOME/.bash_profile" ]; then
-    SHELL_FILE="$USER_HOME/.bash_profile"
-else
-    # Default fallback
-    SHELL_FILE="$USER_HOME/.bashrc"
+UH=$(eval echo "~$TARGET_USER"); SF="$UH/.bash_profile"
+[ -f "$UH/.bashrc" ] && SF="$UH/.bashrc"
+if ! grep -q "boot_menu.sh" "$SF"; then
+    echo 'if [[ -z $DISPLAY ]] && [[ $(tty) = /dev/tty1 ]]; then /usr/local/bin/boot_menu.sh user_mode; fi' >> "$SF"
+    chown "$TARGET_USER" "$SF"
 fi
 
-echo -e "Adding entry to ${GREEN}$SHELL_FILE${NC}"
-
-# Ensure we don't duplicate
-if ! grep -q "boot_menu.sh" "$SHELL_FILE"; then
-    cat << 'EOF' >> "$SHELL_FILE"
-
-# --- TUI BOOT DASHBOARD START ---
-if [[ -z $DISPLAY ]] && [[ $(tty) = /dev/tty1 ]]; then
-    /usr/local/bin/boot_menu.sh
-fi
-# --- TUI BOOT DASHBOARD END ---
-EOF
-    # Fix ownership if we ran as root (likely)
-    chown "$TARGET_USER" "$SHELL_FILE"
-else
-    echo "Hook already exists, skipping."
-fi
-
-# 7. FINISH
-echo -e "\n${GREEN}=== INSTALLATION COMPLETE ===${NC}"
-echo -e "IMPORTANT: You must disable your current display manager (Login Screen) for this to work."
-echo -e "Run one of the following commands depending on what you have installed:"
-echo -e "  ${CYAN}sudo systemctl disable gdm${NC} (GNOME)"
-echo -e "  ${CYAN}sudo systemctl disable lightdm${NC} (XFCE/Mate)"
-echo -e "  ${CYAN}sudo systemctl disable sddm${NC} (KDE/Plasma)"
-echo -e "\nThen reboot your system."
+echo -e "\n${GREEN}=== V8 INSTALLED ===${NC}"
+echo "To use an image:"
+echo "1. Place a .png or .jpg at /etc/boot_logo.png (or any path)"
+echo "2. Edit /etc/bootmenu.conf and set IMAGE_PATH"
+echo "3. In the menu, go to Settings and toggle 'Show Image'"
