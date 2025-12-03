@@ -1,53 +1,47 @@
 #!/bin/bash
 # ==============================================================================
-#  SBM - Simple Boot Menu (Application Source)
-#  Version: 8.0 (Custom Borders & Images)
+#  SBM - Simple Boot Menu (Final Core V9)
+#  Features: Login, Dashboard, Battery, Clock, Wayland/X11 Detect, Custom Ark
 # ==============================================================================
 
-# --- CONFIGURATION LOADING ---
+# --- CONFIGURATION ---
 GLOBAL_CONF="/etc/sbm.conf"
 
-# Default Configuration
+# Defaults
 : ${THEME_COLOR:="6"}        # Cyan
 : ${BORDER_COLOR:="7"}       # White
-: ${BORDER_STYLE:="rounded"} # rounded, double, bold, single
+: ${BORDER_STYLE:="rounded"} 
 : ${DEFAULT_USER:="root"}
 : ${AUTO_LOGIN:="false"}
 : ${SHOW_IMAGE:="false"}
 : ${IMAGE_PATH:="/usr/share/pixmaps/boot_logo.png"}
 
-# Load Global Config
+# Load Config
 if [ -f "$GLOBAL_CONF" ]; then source "$GLOBAL_CONF"; fi
 
-# --- INITIALIZATION ---
-# Hide cursor and handle exit signals
+# --- INIT ---
 tput civis
 trap "tput cnorm; clear; exit" INT TERM
 
-# Base Colors
 C_RESET=$(tput sgr0)
 C_BOLD=$(tput bold)
 C_SEL_BG=$(tput setab 4); C_SEL_FG=$(tput setaf 7)
-C_ERR=$(tput setaf 1)
+C_ERR=$(tput setaf 1); C_WARN=$(tput setaf 3)
 
 # --- THEME ENGINE ---
 apply_theme() {
-    # 1. Set Colors
     C_ACCENT=$(tput setaf "$THEME_COLOR")
     C_BORDER=$(tput setaf "$BORDER_COLOR")
-    
-    # 2. Set Border Characters
     case "$BORDER_STYLE" in
         "double")  TLC="╔" TRC="╗" H="═" V="║" BLC="╚" BRC="╝" ;;
         "rounded") TLC="╭" TRC="╮" H="─" V="│" BLC="╰" BRC="╯" ;;
         "bold")    TLC="┏" TRC="┓" H="━" V="┃" BLC="┗" BRC="┛" ;;
-        *)         TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘" ;; # Default Single
+        *)         TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘" ;;
     esac
 }
 apply_theme
 
 save_config() {
-    # Helper to update specific lines in config file using sudo sed
     update_key() {
         local key=$1; local val=$2
         if grep -q "^$key=" "$GLOBAL_CONF"; then
@@ -64,36 +58,77 @@ save_config() {
     update_key "SHOW_IMAGE" "$SHOW_IMAGE"
 }
 
-# --- GRAPHICS FUNCTIONS ---
+# --- UTILS ---
+
+get_battery() {
+    # Check for battery directory
+    if [ -d /sys/class/power_supply/BAT0 ] || [ -d /sys/class/power_supply/BAT1 ]; then
+        # Get capacity (try BAT0 then BAT1)
+        local cap=$(cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -n 1)
+        local status=$(cat /sys/class/power_supply/BAT*/status 2>/dev/null | head -n 1)
+        
+        local icon="BAT"
+        if [ "$status" == "Charging" ]; then icon="CHR"; fi
+        if [ "$status" == "Full" ]; then icon="PWR"; fi
+        
+        echo "$cap% ($icon)"
+    else
+        echo "AC Power"
+    fi
+}
+
+get_time() { date "+%H:%M"; }
+
+confirm_action() {
+    local action=$1
+    local row=$2
+    local col=4
+    tput cup $row $col
+    echo -e "${C_WARN}Are you sure you want to $action? (y/n)${C_RESET}"
+    read -rsn1 key
+    if [[ "$key" == "y" || "$key" == "Y" ]]; then return 0; else return 1; fi
+}
+
+run_custom_cmd() {
+    tput cnorm
+    local row=$(($(tput lines) - 2))
+    tput cup $row 4
+    echo -e "${C_ACCENT}Run Command > ${C_RESET}"
+    tput cup $row 18
+    read cmd
+    if [ -n "$cmd" ]; then
+        clear; eval "$cmd"; echo ""; read -p "Press Enter to return..."
+    fi
+    tput civis
+}
+
+# --- GRAPHICS ---
 
 draw_header() {
     local cols=$(tput cols)
     local center=$(( (cols - 30) / 2 ))
     
     if [ "$SHOW_IMAGE" == "true" ] && [ -f "$IMAGE_PATH" ] && command -v chafa >/dev/null; then
-        # Draw Image (max 30 cols wide, 10 lines tall)
         tput cup 1 $center
         chafa "$IMAGE_PATH" --size 30x10 --align center --stretch 2>/dev/null
     else
-        # Fallback Text Header
         tput cup 2 $center; echo -e "${C_ACCENT}${C_BOLD}      SBM DASHBOARD      ${C_RESET}"
         tput cup 3 $center; echo -e "${C_BORDER}      System Boot Menu     ${C_RESET}"
     fi
 }
 
 draw_info_box() {
-    # 1. Gather Live Stats
+    # Gather Data
     DISTRO=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2 | head -n 1); [ -z "$DISTRO" ] && DISTRO=$(uname -o)
     IP=$(hostname -I | awk '{print $1}'); [ -z "$IP" ] && IP="Offline"
     CPU=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2 + $4) "%"}')
     RAM=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-    DISK=$(df -h / | awk 'NR==2 {print $5}')
     
-    # Calc Top RAM Process
-    read r_n r_k <<< $(ps -eo comm,rss --sort=-rss | awk 'NR==2 {print $1, $2}')
-    if [ -n "$r_k" ]; then R_HOG="$r_n ($((r_k/1024))MB)"; else R_HOG="..."; fi
+    # New Data
+    BAT=$(get_battery)
+    TIME=$(get_time)
 
-    # 2. Draw Box
+    # Box Setup
     local cols=$(tput cols); local width=34
     local start_col=$((cols - width - 2))
 
@@ -101,7 +136,6 @@ draw_info_box() {
     tput cup 1 $start_col
     echo -ne "${C_BORDER}${TLC}"; for ((i=0; i<width; i++)); do echo -ne "$H"; done; echo -ne "${TRC}${C_RESET}"
     
-    # Line Helper
     d_line() {
         local r=$1; local l=$2; local v=$3
         local max=$((width - ${#l} - 2))
@@ -120,9 +154,9 @@ draw_info_box() {
 
     d_line 6 "CPU: " "$CPU"
     d_line 7 "RAM: " "$RAM"
-    d_line 8 "Disk:" "$DISK"
-    d_line 9 "IP:  " "$IP"
-    d_line 10 "Hog: " "$R_HOG"
+    d_line 8 "IP:  " "$IP"
+    d_line 9 "Bat: " "$BAT"
+    d_line 10 "Time:" "$TIME"
 
     # Bottom Border
     tput cup 11 $start_col
@@ -131,7 +165,6 @@ draw_info_box() {
 
 draw_list() {
     local title=$1; local -n arr=$2; local -n sel=$3
-    # Start drawing list below the header/image area
     local start_y=13 
     
     tput cup $start_y 4
@@ -147,12 +180,12 @@ draw_list() {
     done
 }
 
-# --- MENUS ---
+# --- MENU LOOPS ---
 
 menu_customize() {
     local c_sel=0
     while true; do
-        draw_header # Update header in case image toggled
+        draw_header
         local c_opts=("Text Color:   $THEME_COLOR" "Border Color: $BORDER_COLOR" "Border Style: $BORDER_STYLE" "Show Image:   $SHOW_IMAGE" "Back & Save")
         draw_info_box; draw_list "CUSTOMIZE ARK" c_opts c_sel
         
@@ -165,11 +198,7 @@ menu_customize() {
             case $c_sel in
                 0) ((THEME_COLOR++)); [ $THEME_COLOR -gt 7 ] && THEME_COLOR=1; apply_theme ;;
                 1) ((BORDER_COLOR++)); [ $BORDER_COLOR -gt 7 ] && BORDER_COLOR=1; apply_theme ;;
-                2) # Cycle Styles
-                   if [ "$BORDER_STYLE" == "single" ]; then BORDER_STYLE="double"
-                   elif [ "$BORDER_STYLE" == "double" ]; then BORDER_STYLE="rounded"
-                   elif [ "$BORDER_STYLE" == "rounded" ]; then BORDER_STYLE="bold"
-                   else BORDER_STYLE="single"; fi; apply_theme ;;
+                2) if [ "$BORDER_STYLE" == "single" ]; then BORDER_STYLE="double"; elif [ "$BORDER_STYLE" == "double" ]; then BORDER_STYLE="rounded"; elif [ "$BORDER_STYLE" == "rounded" ]; then BORDER_STYLE="bold"; else BORDER_STYLE="single"; fi; apply_theme ;;
                 3) if [ "$SHOW_IMAGE" == "true" ]; then SHOW_IMAGE="false"; else SHOW_IMAGE="true"; fi; clear ;;
                 4) save_config; return ;;
             esac
@@ -177,129 +206,92 @@ menu_customize() {
     done
 }
 
-# --- EXECUTION MODES ---
+# --- MODES ---
 
-# ROOT MODE: Run as Greeter (Login Manager)
 run_greeter() {
-    # If Auto-Login is ON, skip everything and login
-    if [ "$AUTO_LOGIN" == "true" ]; then
-        exec /bin/login -f "$DEFAULT_USER"
-    fi
+    [ "$AUTO_LOGIN" == "true" ] && exec /bin/login -f "$DEFAULT_USER"
 
-    # Python script to check /etc/shadow securely
+    # Python Auth
     PY_AUTH="import spwd,crypt,sys;
 try: print('OK' if crypt.crypt(sys.argv[1], spwd.getspnam(sys.argv[2]).sp_pwdp) == spwd.getspnam(sys.argv[2]).sp_pwdp else 'NO')
 except: print('NO')"
 
-    # Get valid users (UID >= 1000)
     local users=($(awk -F: '$3>=1000{print $1}' /etc/passwd))
     local sel=0
     
     while true; do
-        clear
-        draw_header
-        
-        # Draw Login List
+        clear; draw_header
         local cx=$(( ($(tput cols)-20)/2 )); local cy=14
         tput cup $cy $cx; echo -e "${C_ACCENT}${C_BOLD}SYSTEM LOGIN${C_RESET}"
         
         for ((i=0; i<${#users[@]}; i++)); do
             tput cup $((cy+2+i)) $cx
-            if [ $i -eq $sel ]; then
-                echo -e "${C_SEL_BG}${C_SEL_FG} > ${users[$i]} ${C_RESET}"
-            else
-                echo -e "   ${users[$i]} "
-            fi
+            [ $i -eq $sel ] && echo -e "${C_SEL_BG}${C_SEL_FG} > ${users[$i]} ${C_RESET}" || echo -e "   ${users[$i]} "
         done
         
-        # Key Handling
         read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
-             read -rsn2 key
-             [ "$key" == "[A" ] && ((sel--)); [ "$key" == "[B" ] && ((sel++))
+             read -rsn2 key; [ "$key" == "[A" ] && ((sel--)); [ "$key" == "[B" ] && ((sel++))
              [ $sel -lt 0 ] && sel=$((${#users[@]}-1)); [ $sel -ge ${#users[@]} ] && sel=0
         elif [[ $key == "" ]]; then
-             # User Selected
              tput cup $((cy+${#users[@]}+3)) $cx; echo -ne "Password: "
              tput cnorm; read -s pwd; tput civis; echo ""
-             
-             # Verify
              res=$(python3 -c "$PY_AUTH" "$pwd" "${users[$sel]}")
-             if [ "$res" == "OK" ]; then
-                 clear; exec /bin/login -f "${users[$sel]}"
-             else
-                 tput cup $((cy+${#users[@]}+5)) $cx
-                 echo -e "${C_ERR}Incorrect Password${C_RESET}"; sleep 1
+             if [ "$res" == "OK" ]; then clear; exec /bin/login -f "${users[$sel]}"; else
+                 tput cup $((cy+${#users[@]}+5)) $cx; echo -e "${C_ERR}Incorrect Password${C_RESET}"; sleep 1
              fi
         fi
     done
 }
 
-# USER MODE: Run as Dashboard
 run_dashboard() {
     OPTS=(); CMDS=()
-    # Scan for DEs
-    for p in /usr/share/xsessions/*.desktop /usr/share/wayland-sessions/*.desktop; do
+    # Detect Wayland Sessions
+    for p in /usr/share/wayland-sessions/*.desktop; do
         [ -f "$p" ] || continue
         n=$(grep -m1 "^Name=" "$p" | cut -d= -f2); [ -z "$n" ] && n=$(basename "$p" .desktop)
-        OPTS+=("$n"); CMDS+=($(grep -m1 "^Exec=" "$p" | cut -d= -f2))
+        OPTS+=("$n (Wayland)"); CMDS+=($(grep -m1 "^Exec=" "$p" | cut -d= -f2))
+    done
+    # Detect X11 Sessions
+    for p in /usr/share/xsessions/*.desktop; do
+        [ -f "$p" ] || continue
+        n=$(grep -m1 "^Name=" "$p" | cut -d= -f2); [ -z "$n" ] && n=$(basename "$p" .desktop)
+        OPTS+=("$n (X11)"); CMDS+=($(grep -m1 "^Exec=" "$p" | cut -d= -f2))
     done
     
-    # Add System Tools
-    OPTS+=("──────────────")
-    CMDS+=("none")
-    OPTS+=("Customize / Ark")
-    CMDS+=("ark")
-    OPTS+=("Shell (Exit)")
-    CMDS+=("exit")
-    OPTS+=("Reboot")
-    CMDS+=("systemctl reboot")
-    OPTS+=("Shutdown")
-    CMDS+=("systemctl poweroff")
-    
+    OPTS+=("──────────────" "Run Command..." "Settings / Ark" "Shell (Exit)" "Reboot" "Shutdown")
+    CMDS+=("none" "run" "ark" "exit" "reboot" "poweroff")
     SEL=0
     
     while true; do
-        draw_header
-        draw_info_box
-        draw_list "BOOT MENU" OPTS SEL
+        draw_header; draw_info_box; draw_list "BOOT MENU" OPTS SEL
         
-        # Wait for key with timeout (updates stats)
         read -rsn1 -t 2 key
-        [ $? -gt 128 ] && continue # Timeout -> refresh
+        [ $? -gt 128 ] && continue
         
         if [[ $key == $'\x1b' ]]; then
             read -rsn2 key
             case "$key" in '[A') ((SEL--));; '[B') ((SEL++));; esac
-            # Skip separator
-            if [[ "${OPTS[$SEL]}" == *"──"* ]]; then
-                 if [ "$key" == "[A" ]; then ((SEL--)); else ((SEL++)); fi
-            fi
+            [[ "${OPTS[$SEL]}" == *"──"* ]] && { if [ "$key" == "[A" ]; then ((SEL--)); else ((SEL++)); fi; }
             [ $SEL -lt 0 ] && SEL=$((${#OPTS[@]}-1)); [ $SEL -ge ${#OPTS[@]} ] && SEL=0
         elif [[ $key == "" ]]; then
             CMD=${CMDS[$SEL]}
             case "$CMD" in
                 "none") continue ;;
+                "run") run_custom_cmd; clear ;;
                 "ark") menu_customize; clear ;;
                 "exit") tput cnorm; clear; exit 0 ;;
-                *"systemctl"*) clear; eval $CMD ;;
+                "reboot") confirm_action "Reboot" 20 && { clear; systemctl reboot; }; clear ;;
+                "poweroff") confirm_action "Shutdown" 20 && { clear; systemctl poweroff; }; clear ;;
                 *) tput cnorm; clear; 
                    if [[ -f ~/.xinitrc ]]; then
                         sed -i '/^exec/d' ~/.xinitrc
                         echo "exec $CMD" >> ~/.xinitrc
                         startx
-                   else
-                        eval $CMD
-                   fi; exit 0 ;;
+                   else eval $CMD; fi; exit 0 ;;
             esac
         fi
     done
 }
 
-# --- ENTRY POINT ---
-# Check if running as root without specific argument
-if [ "$EUID" -eq 0 ] && [ "$1" != "user_mode" ]; then
-    run_greeter
-else
-    run_dashboard
-fi
+if [ "$EUID" -eq 0 ] && [ "$1" != "user_mode" ]; then run_greeter; else run_dashboard; fi
