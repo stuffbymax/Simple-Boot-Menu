@@ -118,8 +118,8 @@ draw_info_box() {
     echo -ne "${TRC}${C_RESET}"
 
     tput cup 2 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}OS:${C_RESET}   ${DISTRO:0:20}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
-    tput cup 3 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}User:${C_RESET} ${USER}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
-    tput cup 4 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}Def.:${C_RESET} $(get_default_user)\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
+    tput cup 3 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}MEM:${C_RESET}  ${MEM} ${width}C ${C_BOX}${V}${C_RESET}"
+    tput cup 4 $start_col; echo -e "${C_BOX}${V}${C_RESET} ${C_ACCENT}User:${C_RESET} ${USER}\033[${start_col}G\033[${width}C ${C_BOX}${V}${C_RESET}"
 
     tput cup 5 $start_col
     echo -ne "${C_BOX}${BLC}"
