@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-#   SBM - System Boot Manager v0.0.1
+#   SBM - System Boot Manager v0.0.1 (Expanded)
 #   A lightweight, hybrid console/graphical login manager.
 # ==============================================================================
 
@@ -12,12 +12,15 @@ CONFIG_FILE="$CONFIG_DIR/sbm.conf"
 CACHE_FILE="$CONFIG_DIR/last_session"
 LOG_DIR="/var/log/sbm"
 
+# Ensure directories exist
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
 
 # Defaults
-THEME_COLOR="6"   # Cyan
-THEME_BORDER="1"  # 1=Single, 2=Double
+THEME_COLOR="6"        # Cyan
+THEME_BORDER="1"       # 1=Single, 2=Double
+CUSTOM_TITLE="SBM MANAGER"
 
 # Load Config
 if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
@@ -28,33 +31,36 @@ trap "tput cnorm; clear; exit" INT TERM
 
 # Colors
 C_RESET=$(tput sgr0)
+C_BOLD=$(tput bold)
 C_RED=$(tput setaf 1)
 C_GREEN=$(tput setaf 2)
 C_CYAN=$(tput setaf 6)
 C_WHITE=$(tput setaf 7)
 C_GREY=$(tput setaf 8)
-C_BOLD=$(tput bold)
+
+# Dynamic Color Variables
 C_ACCENT=$(tput setaf "$THEME_COLOR")
 C_SEL_BG=$(tput setab "$THEME_COLOR"); C_SEL_FG=$(tput setaf 0)
 C_BOX=$(tput setaf 8)
 
-# Borders
-if [ "$THEME_BORDER" == "1" ]; then
-    TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘"
-else
-    TLC="╔" TRC="╗" H="═" V="║" BLC="╚" BRC="╝"
-fi
-
 # --- 2. UTILITIES ---
+
+update_visuals() {
+    C_ACCENT=$(tput setaf "$THEME_COLOR")
+    C_SEL_BG=$(tput setab "$THEME_COLOR")
+    
+    if [ "$THEME_BORDER" == "1" ]; then
+        TLC="┌" TRC="┐" H="─" V="│" BLC="└" BRC="┘"
+    else
+        TLC="╔" TRC="╗" H="═" V="║" BLC="╚" BRC="╝"
+    fi
+}
+update_visuals # Run once on start
 
 save_config() {
     echo "THEME_COLOR=\"$THEME_COLOR\"" > "$CONFIG_FILE"
     echo "THEME_BORDER=\"$THEME_BORDER\"" >> "$CONFIG_FILE"
-}
-
-update_colors() {
-    C_ACCENT=$(tput setaf "$THEME_COLOR")
-    C_SEL_BG=$(tput setab "$THEME_COLOR")
+    echo "CUSTOM_TITLE=\"$CUSTOM_TITLE\"" >> "$CONFIG_FILE"
 }
 
 get_ip() {
@@ -63,7 +69,6 @@ get_ip() {
 }
 
 get_users() {
-    # Get users UID >= 1000
     mapfile -t USER_LIST < <(awk -F: '$3 >= 1000 && $3 < 60000 {print $1}' /etc/passwd)
     if [ ${#USER_LIST[@]} -eq 0 ]; then USER_LIST=("root"); fi
 }
@@ -102,17 +107,14 @@ scan_sessions() {
     fi
 }
 
-# --- 3. AUTHENTICATION & SECURITY ---
+# --- 3. AUTHENTICATION ---
 
 verify_credentials() {
     local user=$1; local pass=$2
     
-    # Check for empty password users (NOPASSWD)
     local status_str=$(passwd -S "$user" 2>/dev/null | awk '{print $2}')
-    if [[ "$status_str" == "NP" ]]; then return 0; fi
-
-    # If input empty but user has password, fail
-    if [ -z "$pass" ]; then return 1; fi
+    if [[ "$status_str" == "NP" ]]; then return 0; fi # No Password set
+    if [ -z "$pass" ]; then return 1; fi # Empty input not allowed if pass exists
 
     # Python Shadow Check
     python3 -c "
@@ -126,91 +128,79 @@ except: sys.exit(1)
 " "$user" "$pass"
 }
 
-# --- 4. SESSION LAUNCHER (The Core Logic) ---
+# --- 4. SESSION LAUNCHER ---
 
 prepare_env_script() {
-    local user=$1
-    local type=$2
-    local cmd=$3
-    local desktop_name=$4
+    local user=$1; local type=$2; local cmd=$3; local desktop_name=$4
     local script_path="/tmp/sbm-start-$user.sh"
     
-    # Get user shell
     local user_shell=$(awk -F: -v u="$user" '$1==u {print $7}' /etc/passwd)
     if [ -z "$user_shell" ]; then user_shell="/bin/bash"; fi
+    local user_home=$(awk -F: -v u="$user" '$1==u {print $6}' /etc/passwd)
 
-    # Create the launch script
     cat <<EOF > "$script_path"
 #!$user_shell
-# SBM Session Wrapper
+exec > "/var/log/sbm/${user}-session.log" 2>&1
+echo "--- SBM Session Start: \$(date) ---"
 
-# 1. Source Profiles
+# Source Profiles
 [ -f /etc/profile ] && . /etc/profile
-[ -f \$HOME/.profile ] && . \$HOME/.profile
-[ -f \$HOME/.bash_profile ] && . \$HOME/.bash_profile
+[ -f "$user_home/.profile" ] && . "$user_home/.profile"
+[ -f "$user_home/.bash_profile" ] && . "$user_home/.bash_profile"
 
-# 2. Set XDG Variables
+# Exports
+export USER="$user"
+export HOME="$user_home"
+export SHELL="$user_shell"
 export XDG_SEAT="seat0"
 export XDG_VTNR="\$(tty | tr -dc '0-9')"
 export XDG_SESSION_CLASS="user"
 export XDG_SESSION_TYPE="$type"
-export HOME="/home/$user"
-export USER="$user"
-export SHELL="$user_shell"
 
-# 3. Type Specifics
+# Runtime Dir
+if [ -z "\$XDG_RUNTIME_DIR" ]; then
+    export XDG_RUNTIME_DIR="/run/user/\$(id -u)"
+    if [ ! -d "\$XDG_RUNTIME_DIR" ]; then
+        mkdir -p "\$XDG_RUNTIME_DIR"
+        chmod 700 "\$XDG_RUNTIME_DIR"
+    fi
+fi
+
 if [ "$type" == "wayland" ]; then
     export XDG_CURRENT_DESKTOP="$desktop_name"
-    # Ensure Runtime Dir exists (handled by logind usually, but safety check)
-    if [ -z "\$XDG_RUNTIME_DIR" ]; then
-        export XDG_RUNTIME_DIR="/run/user/\$(id -u)"
-    fi
     exec $cmd
 elif [ "$type" == "x11" ]; then
-    # Generate Xauthority if missing
-    if [ ! -f \$HOME/.Xauthority ]; then
-        xauth generate :0 . trusted >/dev/null 2>&1
-    fi
-    
-    # Create temp xinitrc
-    echo "exec $cmd" > \$HOME/.xinitrc
+    export DISPLAY=:0
+    if [ ! -f "\$HOME/.Xauthority" ]; then touch "\$HOME/.Xauthority"; fi
+    xauth generate :0 . trusted >/dev/null 2>&1
+    echo "#!/bin/sh" > "\$HOME/.xinitrc"
+    echo ". /etc/profile" >> "\$HOME/.xinitrc"
+    echo "exec $cmd" >> "\$HOME/.xinitrc"
     exec startx
 else
     exec $cmd
 fi
 EOF
-
     chmod +x "$script_path"
     chown "$user:$user" "$script_path"
     echo "$script_path"
 }
 
 launch_session() {
-    local cmd="$1"
-    local type="$2"
-    local user="$3"
-    local name="$4"
+    local cmd="$1"; local type="$2"; local user="$3"; local name="$4"
     local logfile="$LOG_DIR/${user}.log"
 
     tput cnorm; clear
     echo -e "${C_ACCENT}Initializing session for $user...${C_RESET}"
     
-    # Prepare Log
-    touch "$logfile"
-    chown "$user:$user" "$logfile"
-    
-    # Create wrapper script
+    touch "$logfile"; chown "$user:$user" "$logfile"
     local starter_script
     starter_script=$(prepare_env_script "$user" "$type" "$cmd" "$name")
     
-    # Execute as user
-    # We use 'su -' to ensure login shell behavior
-    su - "$user" -c "$starter_script" > "$logfile" 2>&1
-    
-    # Cleanup
+    su - "$user" -c "$starter_script"
     rm -f "$starter_script"
     
-    tput civis
+    tput civis; sleep 1
 }
 
 # --- 5. UI COMPONENTS ---
@@ -226,7 +216,7 @@ draw_header() {
     tput cup 1 $start_col; echo -ne "${C_BOX}${TLC}"
     for ((i=0; i<width; i++)); do echo -ne "$H"; done; echo -ne "${TRC}${C_RESET}"
 
-    local title=" SBM v$SBM_VERSION "
+    local title=" $CUSTOM_TITLE "
     local title_len=${#title}
     local pad=$(( (width - title_len) / 2 ))
     tput cup 1 $((start_col + pad + 1)); echo -e "${C_ACCENT}${C_BOLD}${title}${C_RESET}"
@@ -256,7 +246,37 @@ draw_list() {
     done
 }
 
-# --- 6. SUB-MENUS (User Mgmt) ---
+# --- 6. SUB-MENUS ---
+
+menu_customize() {
+    local c_sel=0
+    
+    while true; do
+        local c_opts=("Theme Color: $THEME_COLOR" "Border Style: $THEME_BORDER" "Change Title" "Back")
+        draw_header
+        draw_list "CUSTOMIZE SBM" c_opts c_sel
+        
+        read -rsn1 key
+        if [[ $key == $'\x1b' ]]; then
+            read -rsn2 key
+            if [[ $key == "" ]]; then return; fi # ESC pressed
+            case "$key" in '[A') ((c_sel--));; '[B') ((c_sel++));; esac
+            [ $c_sel -lt 0 ] && c_sel=$(( ${#c_opts[@]} - 1 ))
+            [ $c_sel -ge ${#c_opts[@]} ] && c_sel=0
+        elif [[ $key == "" ]]; then
+            case $c_sel in
+                0) ((THEME_COLOR++)); [ $THEME_COLOR -gt 7 ] && THEME_COLOR=1; update_visuals; save_config ;;
+                1) if [ "$THEME_BORDER" == "1" ]; then THEME_BORDER="2"; else THEME_BORDER="1"; fi; update_visuals; save_config ;;
+                2) tput cnorm; clear; 
+                   echo -e "${C_ACCENT}Current Title:${C_RESET} $CUSTOM_TITLE"
+                   read -p "Enter new title: " nt
+                   if [ ! -z "$nt" ]; then CUSTOM_TITLE="$nt"; save_config; fi
+                   tput civis ;;
+                3) return ;;
+            esac
+        fi
+    done
+}
 
 menu_users() {
     local u_sel=0
@@ -269,26 +289,24 @@ menu_users() {
         read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
             read -rsn2 key
+            if [[ $key == "" ]]; then return; fi # ESC
             case "$key" in '[A') ((u_sel--));; '[B') ((u_sel++));; esac
             [ $u_sel -lt 0 ] && u_sel=$(( ${#u_opts[@]} - 1 ))
             [ $u_sel -ge ${#u_opts[@]} ] && u_sel=0
         elif [[ $key == "" ]]; then
             case $u_sel in
-                0) # Create
-                   tput cnorm; clear; echo "--- NEW USER ---"
+                0) tput cnorm; clear; echo "--- NEW USER ---"
                    read -p "Username: " nu
                    if [ ! -z "$nu" ]; then 
-                       useradd -m -G wheel -s /bin/bash "$nu" && passwd "$nu"
-                       echo "Done."
+                       if id "$nu" >/dev/null 2>&1; then echo "Exists!"; sleep 1;
+                       else useradd -m -G wheel -s /bin/bash "$nu" && passwd "$nu"; echo "Done."; sleep 1; fi
                    fi
-                   tput civis; sleep 1 ;;
-                1) # Password
-                   tput cnorm; clear; echo "--- CHANGE PASS ---"
+                   tput civis ;;
+                1) tput cnorm; clear; echo "--- CHANGE PASS ---"
                    read -p "Target Username: " tu
                    if id "$tu" >/dev/null 2>&1; then passwd "$tu"; else echo "User not found"; fi
                    tput civis; sleep 1 ;;
-                2) # Auto Login
-                   get_users
+                2) get_users
                    local al_sel=0
                    while true; do
                        draw_header
@@ -302,22 +320,20 @@ menu_users() {
                            systemctl daemon-reload
                            clear; echo "Auto-login set for $target."; sleep 1; break
                        elif [[ $k == $'\x1b' ]]; then break; fi
-                   done
-                   ;;
+                   done ;;
                 3) return ;;
             esac
         fi
     done
 }
 
-# --- 7. MAIN LOGIN SCREEN (Visual Mode) ---
+# --- 7. MAIN LOGIN SCREEN ---
 
 screen_login() {
     get_users; scan_sessions
     local sel_u=0; local sel_s=0
     if [ -f "$CACHE_FILE" ]; then source "$CACHE_FILE"; fi
     
-    # Restore selection index based on name
     for i in "${!USER_LIST[@]}"; do [[ "${USER_LIST[$i]}" == "$LAST_USER" ]] && sel_u=$i; done
     for i in "${!SESSION_NAMES[@]}"; do [[ "${SESSION_NAMES[$i]}" == "$LAST_SESSION" ]] && sel_s=$i; done
 
@@ -327,7 +343,6 @@ screen_login() {
         draw_header
         local cy=10; local cols=$(tput cols); local cx=$((cols/2))
         
-        # Status
         tput cup $((cy - 2)) 0
         if [ ! -z "$status" ]; then
             local msg="< $status >"
@@ -335,45 +350,37 @@ screen_login() {
             tput cup $((cy - 2)) $start; echo -e "${stat_col}${C_BOLD}${msg}${C_RESET}"
         else tput el; fi
 
-        # Controls
         local c_foc; local cursor
         
-        # Session
         [ $focus -eq 0 ] && c_foc=$C_ACCENT || c_foc=$C_GREY
         tput cup $cy $((cx-20)); echo -e "${C_GREY}session${C_RESET}"
         tput cup $cy $((cx-5)); echo -e "${c_foc}< ${C_WHITE}${SESSION_NAMES[$sel_s]} ${c_foc}>${C_RESET}   "
 
-        # User
         [ $focus -eq 1 ] && c_foc=$C_ACCENT || c_foc=$C_GREY
         tput cup $((cy+2)) $((cx-20)); echo -e "${C_GREY}login${C_RESET}"
         tput cup $((cy+2)) $((cx-5)); echo -e "${c_foc}< ${C_WHITE}${USER_LIST[$sel_u]} ${c_foc}>${C_RESET}   "
 
-        # Password
         [ $focus -eq 2 ] && { c_foc=$C_WHITE; cursor="${C_ACCENT}█${C_RESET}"; } || { c_foc=$C_GREY; cursor=""; }
         local mask=""; for ((i=0; i<${#input_pass}; i++)); do mask+="*"; done
         tput cup $((cy+4)) $((cx-20)); echo -e "${C_GREY}password${C_RESET}"
         tput cup $((cy+4)) $((cx-5)); echo -e "${c_foc}${mask}${cursor}      "
 
-        # Input
         IFS= read -rsn1 key
         if [[ $key == $'\x1b' ]]; then
             read -rsn2 key
+            if [[ $key == "" ]]; then return; fi # ESC returns to dashboard
             case "$key" in
                 '[A') ((focus--)); [ $focus -lt 0 ] && focus=2 ;;
                 '[B') ((focus++)); [ $focus -gt 2 ] && focus=0 ;;
-                '[C') 
-                     if [ $focus -eq 0 ]; then ((sel_s++)); [ $sel_s -ge ${#SESSION_NAMES[@]} ] && sel_s=0; fi
-                     if [ $focus -eq 1 ]; then ((sel_u++)); [ $sel_u -ge ${#USER_LIST[@]} ] && sel_u=0; fi ;;
-                '[D') 
-                     if [ $focus -eq 0 ]; then ((sel_s--)); [ $sel_s -lt 0 ] && sel_s=$((${#SESSION_NAMES[@]}-1)); fi
-                     if [ $focus -eq 1 ]; then ((sel_u--)); [ $sel_u -lt 0 ] && sel_u=$((${#USER_LIST[@]}-1)); fi ;;
+                '[C') if [ $focus -eq 0 ]; then ((sel_s++)); [ $sel_s -ge ${#SESSION_NAMES[@]} ] && sel_s=0; fi
+                      if [ $focus -eq 1 ]; then ((sel_u++)); [ $sel_u -ge ${#USER_LIST[@]} ] && sel_u=0; fi ;;
+                '[D') if [ $focus -eq 0 ]; then ((sel_s--)); [ $sel_s -lt 0 ] && sel_s=$((${#SESSION_NAMES[@]}-1)); fi
+                      if [ $focus -eq 1 ]; then ((sel_u--)); [ $sel_u -lt 0 ] && sel_u=$((${#USER_LIST[@]}-1)); fi ;;
             esac
-            if [[ $key == "" ]]; then return; fi
         elif [[ $key == "" ]]; then
             if [ $focus -ne 2 ]; then focus=2; else
                 status="Verifying..."; stat_col=$C_CYAN; input_pass=""
-                draw_header # redraw status
-                
+                draw_header
                 if verify_credentials "${USER_LIST[$sel_u]}" "$input_pass"; then
                      echo "LAST_USER=\"${USER_LIST[$sel_u]}\"" > "$CACHE_FILE"
                      echo "LAST_SESSION=\"${SESSION_NAMES[$sel_s]}\"" >> "$CACHE_FILE"
@@ -396,7 +403,7 @@ screen_login() {
 
 screen_dashboard() {
     local m_sel=0
-    local m_opts=("Login to Desktop" "User Management" "Customize Theme" "System Info" "Reboot" "Shutdown")
+    local m_opts=("Login to Desktop" "Drop to Shell" "User Management" "Customize SBM" "Reboot" "Shutdown")
     
     while true; do
         draw_header
@@ -410,9 +417,13 @@ screen_dashboard() {
         elif [[ $key == "" ]]; then
             case $m_sel in
                 0) screen_login ;;
-                1) menu_users ;;
-                2) ((THEME_COLOR++)); [ $THEME_COLOR -gt 7 ] && THEME_COLOR=1; update_colors; save_config ;;
-                3) clear; echo -e "${C_ACCENT}DISK:${C_RESET} $(df -h / | awk 'NR==2 {print $5}')"; read -rsn1 ;;
+                1) tput cnorm; clear; 
+                   echo -e "${C_RED}Warning: Entering Root Shell.${C_RESET}"
+                   echo -e "Type 'exit' to return to SBM."
+                   /bin/bash
+                   tput civis ;;
+                2) menu_users ;;
+                3) menu_customize ;;
                 4) systemctl reboot ;;
                 5) systemctl poweroff ;;
             esac
@@ -420,11 +431,6 @@ screen_dashboard() {
     done
 }
 
-# --- 9. STARTUP CHECK ---
-
-if [ "$EUID" -ne 0 ]; then
-    echo "SBM Error: Must run as root."
-    exit 1
-fi
-
+# --- 9. STARTUP ---
+if [ "$EUID" -ne 0 ]; then echo "SBM Error: Must run as root."; exit 1; fi
 screen_dashboard
