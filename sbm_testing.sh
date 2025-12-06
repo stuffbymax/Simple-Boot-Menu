@@ -111,7 +111,7 @@ draw_info_box() {
     echo -ne "${TRC}${C_RESET}"
 
     # Centered Title
-    local title=" CORE MANAGER "
+    local title=" SYSTEM INFO "
     local title_len=${#title}
     local pad=$(( (width - title_len) / 2 ))
     tput cup 1 $((start_col + pad + 1)); echo -e "${C_ACCENT}${C_BOLD}${title}${C_RESET}"
